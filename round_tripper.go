@@ -83,7 +83,7 @@ func (rt *RoundTripper) writePreamble() error {
 	var err error
 	creatorJson, _ := json.Marshal(rt.opts.Creator)
 
-	_, err = rt.writer.Write([]byte(`{"log":{"creator":`))
+	_, err = rt.writer.Write([]byte(`{"log":{"version":"1.2","creator":`))
 	if err != nil {
 		return fmt.Errorf("writing preamble: %w", err)
 	}
