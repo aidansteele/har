@@ -10,104 +10,33 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"strings"
-	"sync"
 	"time"
 )
 
 var _ http.RoundTripper = (*RoundTripper)(nil)
 
-var DefaultOptions = &Options{
-	Creator: &Creator{
-		Name:    "github.com/aidansteele/har",
-		Version: "0.1",
-	},
-	Rewrite: func(request *http.Request, response *http.Response, entry json.RawMessage) json.RawMessage {
-		return entry
-	},
-}
-
 type RoundTripper struct {
-	inner  http.RoundTripper
-	opts   *Options
-	mut    sync.Mutex
-	first  bool
-	writer io.Writer
+	inner   http.RoundTripper
+	writer  Writer
+	rewrite func(request *http.Request, response *http.Response, entry json.RawMessage) json.RawMessage
 }
 
-type Options struct {
-	Rewrite func(request *http.Request, response *http.Response, entry json.RawMessage) json.RawMessage
-	Creator *Creator
-}
-
-func New(roundTripper http.RoundTripper, w io.Writer, opts *Options) (*RoundTripper, error) {
+func New(roundTripper http.RoundTripper, writer Writer, rewrite func(request *http.Request, response *http.Response, entry json.RawMessage) json.RawMessage) *RoundTripper {
 	if roundTripper == nil {
 		roundTripper = http.DefaultTransport
 	}
 
-	if opts == nil {
-		opts = DefaultOptions
+	if rewrite == nil {
+		rewrite = func(request *http.Request, response *http.Response, entry json.RawMessage) json.RawMessage {
+			return entry
+		}
 	}
 
-	if opts.Rewrite == nil {
-		opts.Rewrite = DefaultOptions.Rewrite
+	return &RoundTripper{
+		inner:   roundTripper,
+		writer:  writer,
+		rewrite: rewrite,
 	}
-
-	if opts.Creator == nil {
-		opts.Creator = DefaultOptions.Creator
-	}
-
-	if opts.Creator.Name == "" {
-		return nil, fmt.Errorf("Options.Creator.Name cannot be empty")
-	}
-
-	if opts.Creator.Version == "" {
-		return nil, fmt.Errorf("Options.Creator.Version cannot be empty")
-	}
-
-	rt := &RoundTripper{
-		inner:  roundTripper,
-		opts:   opts,
-		writer: w,
-		first:  true,
-	}
-
-	err := rt.writePreamble()
-	if err != nil {
-		return nil, err
-	}
-
-	return rt, nil
-}
-
-func (rt *RoundTripper) writePreamble() error {
-	var err error
-	creatorJson, _ := json.Marshal(rt.opts.Creator)
-
-	_, err = rt.writer.Write([]byte(`{"log":{"version":"1.2","creator":`))
-	if err != nil {
-		return fmt.Errorf("writing preamble: %w", err)
-	}
-
-	_, err = rt.writer.Write(creatorJson)
-	if err != nil {
-		return fmt.Errorf("writing preamble: %w", err)
-	}
-
-	_, err = rt.writer.Write([]byte(`,"entries":[` + "\n"))
-	if err != nil {
-		return fmt.Errorf("writing preamble: %w", err)
-	}
-
-	return nil
-}
-
-func (rt *RoundTripper) Close() error {
-	_, err := rt.writer.Write([]byte("\n]}}"))
-	if err != nil {
-		return fmt.Errorf("closing har writer: %w", err)
-	}
-
-	return nil
 }
 
 func (rt *RoundTripper) RoundTrip(request *http.Request) (response *http.Response, err error) {
@@ -139,31 +68,14 @@ func (rt *RoundTripper) RoundTrip(request *http.Request) (response *http.Respons
 }
 
 func (rt *RoundTripper) writeEntry(request *http.Request, response *http.Response, entry *Entry) error {
-	entryJson, err := json.Marshal(entry)
+	entryJson, _ := json.Marshal(entry)
 
-	entryJson = rt.opts.Rewrite(request, response, entryJson)
+	entryJson = rt.rewrite(request, response, entryJson)
 	if entryJson == nil {
 		return nil
 	}
 
-	rt.mut.Lock()
-	defer rt.mut.Unlock()
-
-	if !rt.first {
-		_, err = rt.writer.Write([]byte(",\n"))
-		if err != nil {
-			return fmt.Errorf("writing har entry: %w", err)
-		}
-	}
-
-	rt.first = false
-
-	_, err = rt.writer.Write(entryJson)
-	if err != nil {
-		return fmt.Errorf("writing har entry: %w", err)
-	}
-
-	return nil
+	return rt.writer.WriteEntry(entryJson)
 }
 
 func (rt *RoundTripper) preRoundTrip(r *http.Request, entry *Entry) error {
